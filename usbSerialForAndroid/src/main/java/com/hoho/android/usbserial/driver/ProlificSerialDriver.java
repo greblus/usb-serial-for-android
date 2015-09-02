@@ -223,7 +223,14 @@ public class ProlificSerialDriver implements UsbSerialDriver {
             }
         }
 
-        private final int getStatus() throws IOException {
+        @Override
+        public int setBaudRate(int baudRate) throws IOException {
+            return baudRate;
+        }
+
+
+        @Override
+        public final int getStatus() throws IOException {
             if ((mReadStatusThread == null) && (mReadStatusException == null)) {
                 synchronized (mReadStatusThreadLock) {
                     if (mReadStatusThread == null) {

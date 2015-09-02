@@ -155,7 +155,19 @@ public interface UsbSerialPort {
      * @return the current state, or {@code false} if not supported.
      * @throws IOException if an error occurred during reading
      */
+
     public boolean getCD() throws IOException;
+    
+    /**
+     * Gets modem status bits
+     *
+     * @return the current status, or -1 
+     * @throws IOException if an error occurred during reading
+     */
+
+    public int getStatus() throws IOException;
+
+    public int setBaudRate(int baudRate) throws IOException;
 
     /**
      * Gets the CTS (Clear To Send) bit from the underlying UART.

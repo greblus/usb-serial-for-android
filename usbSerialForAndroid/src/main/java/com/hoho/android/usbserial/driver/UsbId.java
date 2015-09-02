@@ -34,6 +34,8 @@ public final class UsbId {
     public static final int VENDOR_FTDI = 0x0403;
     public static final int FTDI_FT232R = 0x6001;
     public static final int FTDI_FT231X = 0x6015;
+    public static final int FTDI_FT232R1 = 0x83B0;
+    public static final int FTDI_FT232R2 = 0x83B1;
 
     public static final int VENDOR_ATMEL = 0x03EB;
     public static final int ATMEL_LUFA_CDC_DEMO_APP = 0x2044;

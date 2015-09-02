@@ -136,6 +136,7 @@ public class FtdiSerialDriver implements UsbSerialDriver {
         public static final int USB_WRITE_TIMEOUT_MILLIS = 5000;
         public static final int USB_READ_TIMEOUT_MILLIS = 5000;
 
+
         // From ftdi.h
         /**
          * Reset the port.
@@ -161,6 +162,7 @@ public class FtdiSerialDriver implements UsbSerialDriver {
          * Set the data characteristics of the port.
          */
         private static final int SIO_SET_DATA_REQUEST = 4;
+        private static final int SIO_POLL_MODEM_STATUS_REQUEST = 5;
 
         private static final int SIO_RESET_SIO = 0;
         private static final int SIO_RESET_PURGE_RX = 1;
@@ -236,6 +238,18 @@ public class FtdiSerialDriver implements UsbSerialDriver {
 
             // TODO(mikey): autodetect.
             mType = DeviceType.TYPE_R;
+        }
+
+	@Override
+        public int getStatus() throws IOException {
+            byte[] buf = new byte[2];
+            int result = mConnection.controlTransfer(FTDI_DEVICE_IN_REQTYPE, SIO_POLL_MODEM_STATUS_REQUEST,
+                    0, 0, buf, 2, USB_READ_TIMEOUT_MILLIS);
+            Log.i("USB", "getStatus result=" + result + " buf=" + (buf[0]-1));
+            if (result < 0) {
+                throw new IOException("getStatus failed: result=" + result);
+            }
+            return buf[0]-1;
         }
 
         @Override
@@ -327,6 +341,7 @@ public class FtdiSerialDriver implements UsbSerialDriver {
         @Override
         public int write(byte[] src, int timeoutMillis) throws IOException {
             final UsbEndpoint endpoint = mDevice.getInterface(0).getEndpoint(1);
+            Log.i("FTDI", "endpoints: " + mDevice.getInterface(0).getEndpointCount());
             int offset = 0;
 
             while (offset < src.length) {
@@ -334,6 +349,7 @@ public class FtdiSerialDriver implements UsbSerialDriver {
                 final int amtWritten;
 
                 synchronized (mWriteBufferLock) {
+
                     final byte[] writeBuffer;
 
                     writeLength = Math.min(src.length - offset, mWriteBuffer.length);
@@ -360,7 +376,8 @@ public class FtdiSerialDriver implements UsbSerialDriver {
             return offset;
         }
 
-        private int setBaudRate(int baudRate) throws IOException {
+        @Override
+        public int setBaudRate(int baudRate) throws IOException {
             long[] vals = convertBaudrate(baudRate);
             long actualBaudrate = vals[0];
             long index = vals[1];
@@ -574,6 +591,8 @@ public class FtdiSerialDriver implements UsbSerialDriver {
                 new int[] {
                     UsbId.FTDI_FT232R,
                     UsbId.FTDI_FT231X,
+                    UsbId.FTDI_FT232R1, //Ray's Sio2USB-1050PC
+                    UsbId.FTDI_FT232R2
                 });
         return supportedDevices;
     }
