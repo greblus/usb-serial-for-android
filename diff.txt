@@ -1,0 +1,1418 @@
+diff -Nur usbSerialForAndroid/src/main/java/com/hoho/android/usbserial/driver/CdcAcmSerialDriver.java /home/greblus/build/us4a-aspeqt/usbserial/driver/CdcAcmSerialDriver.java
+--- usbSerialForAndroid/src/main/java/com/hoho/android/usbserial/driver/CdcAcmSerialDriver.java	2017-06-24 20:19:58.961502204 +0200
++++ /home/greblus/build/us4a-aspeqt/usbserial/driver/CdcAcmSerialDriver.java	1970-01-01 01:00:00.000000000 +0100
+@@ -1,353 +0,0 @@
+-/* Copyright 2011-2013 Google Inc.
+- * Copyright 2013 mike wakerly <opensource@hoho.com>
+- *
+- * This library is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU Lesser General Public
+- * License as published by the Free Software Foundation; either
+- * version 2.1 of the License, or (at your option) any later version.
+- *
+- * This library is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+- * Lesser General Public License for more details.
+- *
+- * You should have received a copy of the GNU Lesser General Public
+- * License along with this library; if not, write to the Free Software
+- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301,
+- * USA.
+- *
+- * Project home page: https://github.com/mik3y/usb-serial-for-android
+- */
+-
+-package com.hoho.android.usbserial.driver;
+-
+-import android.hardware.usb.UsbConstants;
+-import android.hardware.usb.UsbDevice;
+-import android.hardware.usb.UsbDeviceConnection;
+-import android.hardware.usb.UsbEndpoint;
+-import android.hardware.usb.UsbInterface;
+-import android.hardware.usb.UsbRequest;
+-import android.os.Build;
+-import android.util.Log;
+-
+-import java.io.IOException;
+-import java.nio.ByteBuffer;
+-import java.util.Collections;
+-import java.util.LinkedHashMap;
+-import java.util.List;
+-import java.util.Map;
+-
+-/**
+- * USB CDC/ACM serial driver implementation.
+- *
+- * @author mike wakerly (opensource@hoho.com)
+- * @see <a
+- *      href="http://www.usb.org/developers/devclass_docs/usbcdc11.pdf">Universal
+- *      Serial Bus Class Definitions for Communication Devices, v1.1</a>
+- */
+-public class CdcAcmSerialDriver implements UsbSerialDriver {
+-
+-    private final String TAG = CdcAcmSerialDriver.class.getSimpleName();
+-
+-    private final UsbDevice mDevice;
+-    private final UsbSerialPort mPort;
+-
+-    public CdcAcmSerialDriver(UsbDevice device) {
+-        mDevice = device;
+-        mPort = new CdcAcmSerialPort(device, 0);
+-    }
+-
+-    @Override
+-    public UsbDevice getDevice() {
+-        return mDevice;
+-    }
+-
+-    @Override
+-    public List<UsbSerialPort> getPorts() {
+-        return Collections.singletonList(mPort);
+-    }
+-
+-    class CdcAcmSerialPort extends CommonUsbSerialPort {
+-
+-        private final boolean mEnableAsyncReads;
+-        private UsbInterface mControlInterface;
+-        private UsbInterface mDataInterface;
+-
+-        private UsbEndpoint mControlEndpoint;
+-        private UsbEndpoint mReadEndpoint;
+-        private UsbEndpoint mWriteEndpoint;
+-
+-        private boolean mRts = false;
+-        private boolean mDtr = false;
+-
+-        private static final int USB_RECIP_INTERFACE = 0x01;
+-        private static final int USB_RT_ACM = UsbConstants.USB_TYPE_CLASS | USB_RECIP_INTERFACE;
+-
+-        private static final int SET_LINE_CODING = 0x20;  // USB CDC 1.1 section 6.2
+-        private static final int GET_LINE_CODING = 0x21;
+-        private static final int SET_CONTROL_LINE_STATE = 0x22;
+-        private static final int SEND_BREAK = 0x23;
+-
+-        public CdcAcmSerialPort(UsbDevice device, int portNumber) {
+-            super(device, portNumber);
+-            mEnableAsyncReads = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1);
+-        }
+-
+-        @Override
+-        public UsbSerialDriver getDriver() {
+-            return CdcAcmSerialDriver.this;
+-        }
+-
+-        @Override
+-        public void open(UsbDeviceConnection connection) throws IOException {
+-            if (mConnection != null) {
+-                throw new IOException("Already open");
+-            }
+-
+-            mConnection = connection;
+-            boolean opened = false;
+-            try {
+-                Log.d(TAG, "claiming interfaces, count=" + mDevice.getInterfaceCount());
+-                mControlInterface = mDevice.getInterface(0);
+-                Log.d(TAG, "Control iface=" + mControlInterface);
+-                // class should be USB_CLASS_COMM
+-
+-                if (!mConnection.claimInterface(mControlInterface, true)) {
+-                    throw new IOException("Could not claim control interface.");
+-                }
+-                mControlEndpoint = mControlInterface.getEndpoint(0);
+-                Log.d(TAG, "Control endpoint direction: " + mControlEndpoint.getDirection());
+-
+-                Log.d(TAG, "Claiming data interface.");
+-                mDataInterface = mDevice.getInterface(1);
+-                Log.d(TAG, "data iface=" + mDataInterface);
+-                // class should be USB_CLASS_CDC_DATA
+-
+-                if (!mConnection.claimInterface(mDataInterface, true)) {
+-                    throw new IOException("Could not claim data interface.");
+-                }
+-                mReadEndpoint = mDataInterface.getEndpoint(1);
+-                Log.d(TAG, "Read endpoint direction: " + mReadEndpoint.getDirection());
+-                mWriteEndpoint = mDataInterface.getEndpoint(0);
+-                Log.d(TAG, "Write endpoint direction: " + mWriteEndpoint.getDirection());
+-                if (mEnableAsyncReads) {
+-                  Log.d(TAG, "Async reads enabled");
+-                } else {
+-                  Log.d(TAG, "Async reads disabled.");
+-                }
+-                opened = true;
+-            } finally {
+-                if (!opened) {
+-                    mConnection = null;
+-                }
+-            }
+-        }
+-
+-        private int sendAcmControlMessage(int request, int value, byte[] buf) {
+-            return mConnection.controlTransfer(
+-                    USB_RT_ACM, request, value, 0, buf, buf != null ? buf.length : 0, 5000);
+-        }
+-
+-        @Override
+-        public void close() throws IOException {
+-            if (mConnection == null) {
+-                throw new IOException("Already closed");
+-            }
+-            mConnection.close();
+-            mConnection = null;
+-        }
+-
+-        @Override
+-        public int read(byte[] dest, int timeoutMillis) throws IOException {
+-            if (mEnableAsyncReads) {
+-              final UsbRequest request = new UsbRequest();
+-              try {
+-                request.initialize(mConnection, mReadEndpoint);
+-                final ByteBuffer buf = ByteBuffer.wrap(dest);
+-                if (!request.queue(buf, dest.length)) {
+-                  throw new IOException("Error queueing request.");
+-                }
+-
+-                final UsbRequest response = mConnection.requestWait();
+-                if (response == null) {
+-                  throw new IOException("Null response");
+-                }
+-
+-                final int nread = buf.position();
+-                if (nread > 0) {
+-                  //Log.d(TAG, HexDump.dumpHexString(dest, 0, Math.min(32, dest.length)));
+-                  return nread;
+-                } else {
+-                  return 0;
+-                }
+-              } finally {
+-                request.close();
+-              }
+-            }
+-
+-            final int numBytesRead;
+-            synchronized (mReadBufferLock) {
+-                int readAmt = Math.min(dest.length, mReadBuffer.length);
+-                numBytesRead = mConnection.bulkTransfer(mReadEndpoint, mReadBuffer, readAmt,
+-                        timeoutMillis);
+-                if (numBytesRead < 0) {
+-                    // This sucks: we get -1 on timeout, not 0 as preferred.
+-                    // We *should* use UsbRequest, except it has a bug/api oversight
+-                    // where there is no way to determine the number of bytes read
+-                    // in response :\ -- http://b.android.com/28023
+-                    if (timeoutMillis == Integer.MAX_VALUE) {
+-                        // Hack: Special case "~infinite timeout" as an error.
+-                        return -1;
+-                    }
+-                    return 0;
+-                }
+-                System.arraycopy(mReadBuffer, 0, dest, 0, numBytesRead);
+-            }
+-            return numBytesRead;
+-        }
+-
+-        @Override
+-        public int write(byte[] src, int timeoutMillis) throws IOException {
+-            // TODO(mikey): Nearly identical to FtdiSerial write. Refactor.
+-            int offset = 0;
+-
+-            while (offset < src.length) {
+-                final int writeLength;
+-                final int amtWritten;
+-
+-                synchronized (mWriteBufferLock) {
+-                    final byte[] writeBuffer;
+-
+-                    writeLength = Math.min(src.length - offset, mWriteBuffer.length);
+-                    if (offset == 0) {
+-                        writeBuffer = src;
+-                    } else {
+-                        // bulkTransfer does not support offsets, make a copy.
+-                        System.arraycopy(src, offset, mWriteBuffer, 0, writeLength);
+-                        writeBuffer = mWriteBuffer;
+-                    }
+-
+-                    amtWritten = mConnection.bulkTransfer(mWriteEndpoint, writeBuffer, writeLength,
+-                            timeoutMillis);
+-                }
+-                if (amtWritten <= 0) {
+-                    throw new IOException("Error writing " + writeLength
+-                            + " bytes at offset " + offset + " length=" + src.length);
+-                }
+-
+-                Log.d(TAG, "Wrote amt=" + amtWritten + " attempted=" + writeLength);
+-                offset += amtWritten;
+-            }
+-            return offset;
+-        }
+-
+-        @Override
+-        public void setParameters(int baudRate, int dataBits, int stopBits, int parity) {
+-            byte stopBitsByte;
+-            switch (stopBits) {
+-                case STOPBITS_1: stopBitsByte = 0; break;
+-                case STOPBITS_1_5: stopBitsByte = 1; break;
+-                case STOPBITS_2: stopBitsByte = 2; break;
+-                default: throw new IllegalArgumentException("Bad value for stopBits: " + stopBits);
+-            }
+-
+-            byte parityBitesByte;
+-            switch (parity) {
+-                case PARITY_NONE: parityBitesByte = 0; break;
+-                case PARITY_ODD: parityBitesByte = 1; break;
+-                case PARITY_EVEN: parityBitesByte = 2; break;
+-                case PARITY_MARK: parityBitesByte = 3; break;
+-                case PARITY_SPACE: parityBitesByte = 4; break;
+-                default: throw new IllegalArgumentException("Bad value for parity: " + parity);
+-            }
+-
+-            byte[] msg = {
+-                    (byte) ( baudRate & 0xff),
+-                    (byte) ((baudRate >> 8 ) & 0xff),
+-                    (byte) ((baudRate >> 16) & 0xff),
+-                    (byte) ((baudRate >> 24) & 0xff),
+-                    stopBitsByte,
+-                    parityBitesByte,
+-                    (byte) dataBits};
+-            sendAcmControlMessage(SET_LINE_CODING, 0, msg);
+-        }
+-
+-        @Override
+-        public boolean getCD() throws IOException {
+-            return false;  // TODO
+-        }
+-
+-        @Override
+-        public boolean getCTS() throws IOException {
+-            return false;  // TODO
+-        }
+-
+-        @Override
+-        public boolean getDSR() throws IOException {
+-            return false;  // TODO
+-        }
+-
+-        @Override
+-        public boolean getDTR() throws IOException {
+-            return mDtr;
+-        }
+-
+-        @Override
+-        public void setDTR(boolean value) throws IOException {
+-            mDtr = value;
+-            setDtrRts();
+-        }
+-
+-        @Override
+-        public boolean getRI() throws IOException {
+-            return false;  // TODO
+-        }
+-
+-        @Override
+-        public boolean getRTS() throws IOException {
+-            return mRts;
+-        }
+-
+-        @Override
+-        public void setRTS(boolean value) throws IOException {
+-            mRts = value;
+-            setDtrRts();
+-        }
+-
+-        private void setDtrRts() {
+-            int value = (mRts ? 0x2 : 0) | (mDtr ? 0x1 : 0);
+-            sendAcmControlMessage(SET_CONTROL_LINE_STATE, value, null);
+-        }
+-
+-    }
+-
+-    public static Map<Integer, int[]> getSupportedDevices() {
+-        final Map<Integer, int[]> supportedDevices = new LinkedHashMap<Integer, int[]>();
+-        supportedDevices.put(Integer.valueOf(UsbId.VENDOR_ARDUINO),
+-                new int[] {
+-                        UsbId.ARDUINO_UNO,
+-                        UsbId.ARDUINO_UNO_R3,
+-                        UsbId.ARDUINO_MEGA_2560,
+-                        UsbId.ARDUINO_MEGA_2560_R3,
+-                        UsbId.ARDUINO_SERIAL_ADAPTER,
+-                        UsbId.ARDUINO_SERIAL_ADAPTER_R3,
+-                        UsbId.ARDUINO_MEGA_ADK,
+-                        UsbId.ARDUINO_MEGA_ADK_R3,
+-                        UsbId.ARDUINO_LEONARDO,
+-                });
+-        supportedDevices.put(Integer.valueOf(UsbId.VENDOR_VAN_OOIJEN_TECH),
+-                new int[] {
+-                    UsbId.VAN_OOIJEN_TECH_TEENSYDUINO_SERIAL,
+-                });
+-        supportedDevices.put(Integer.valueOf(UsbId.VENDOR_ATMEL),
+-                new int[] {
+-                    UsbId.ATMEL_LUFA_CDC_DEMO_APP,
+-                });
+-        supportedDevices.put(Integer.valueOf(UsbId.VENDOR_LEAFLABS),
+-                new int[] {
+-                    UsbId.LEAFLABS_MAPLE,
+-                });
+-        return supportedDevices;
+-    }
+-
+-}
+diff -Nur usbSerialForAndroid/src/main/java/com/hoho/android/usbserial/driver/CommonUsbSerialPort.java /home/greblus/build/us4a-aspeqt/usbserial/driver/CommonUsbSerialPort.java
+--- usbSerialForAndroid/src/main/java/com/hoho/android/usbserial/driver/CommonUsbSerialPort.java	2017-06-24 20:19:58.961502204 +0200
++++ /home/greblus/build/us4a-aspeqt/usbserial/driver/CommonUsbSerialPort.java	2017-06-23 21:20:55.939164080 +0200
+@@ -33,8 +33,8 @@
+  */
+ abstract class CommonUsbSerialPort implements UsbSerialPort {
+ 
+-    public static final int DEFAULT_READ_BUFFER_SIZE = 16 * 1024;
+-    public static final int DEFAULT_WRITE_BUFFER_SIZE = 16 * 1024;
++    public static final int DEFAULT_READ_BUFFER_SIZE = 65 * 1024;
++    public static final int DEFAULT_WRITE_BUFFER_SIZE = 65 * 1024;
+ 
+     protected final UsbDevice mDevice;
+     protected final int mPortNumber;
+diff -Nur usbSerialForAndroid/src/main/java/com/hoho/android/usbserial/driver/Cp21xxSerialDriver.java /home/greblus/build/us4a-aspeqt/usbserial/driver/Cp21xxSerialDriver.java
+--- usbSerialForAndroid/src/main/java/com/hoho/android/usbserial/driver/Cp21xxSerialDriver.java	2017-06-24 20:19:58.961502204 +0200
++++ /home/greblus/build/us4a-aspeqt/usbserial/driver/Cp21xxSerialDriver.java	1970-01-01 01:00:00.000000000 +0100
+@@ -1,356 +0,0 @@
+-/* Copyright 2011-2013 Google Inc.
+- * Copyright 2013 mike wakerly <opensource@hoho.com>
+- *
+- * This library is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU Lesser General Public
+- * License as published by the Free Software Foundation; either
+- * version 2.1 of the License, or (at your option) any later version.
+- *
+- * This library is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+- * Lesser General Public License for more details.
+- *
+- * You should have received a copy of the GNU Lesser General Public
+- * License along with this library; if not, write to the Free Software
+- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301,
+- * USA.
+- *
+- * Project home page: https://github.com/mik3y/usb-serial-for-android
+- */
+-
+-package com.hoho.android.usbserial.driver;
+-
+-import android.hardware.usb.UsbConstants;
+-import android.hardware.usb.UsbDevice;
+-import android.hardware.usb.UsbDeviceConnection;
+-import android.hardware.usb.UsbEndpoint;
+-import android.hardware.usb.UsbInterface;
+-import android.util.Log;
+-
+-import java.io.IOException;
+-import java.util.Collections;
+-import java.util.LinkedHashMap;
+-import java.util.List;
+-import java.util.Map;
+-
+-public class Cp21xxSerialDriver implements UsbSerialDriver {
+-
+-    private static final String TAG = Cp21xxSerialDriver.class.getSimpleName();
+-
+-    private final UsbDevice mDevice;
+-    private final UsbSerialPort mPort;
+-
+-    public Cp21xxSerialDriver(UsbDevice device) {
+-        mDevice = device;
+-        mPort = new Cp21xxSerialPort(mDevice, 0);
+-    }
+-
+-    @Override
+-    public UsbDevice getDevice() {
+-        return mDevice;
+-    }
+-
+-    @Override
+-    public List<UsbSerialPort> getPorts() {
+-        return Collections.singletonList(mPort);
+-    }
+-
+-    public class Cp21xxSerialPort extends CommonUsbSerialPort {
+-
+-        private static final int DEFAULT_BAUD_RATE = 9600;
+-
+-        private static final int USB_WRITE_TIMEOUT_MILLIS = 5000;
+-
+-        /*
+-         * Configuration Request Types
+-         */
+-        private static final int REQTYPE_HOST_TO_DEVICE = 0x41;
+-
+-        /*
+-         * Configuration Request Codes
+-         */
+-        private static final int SILABSER_IFC_ENABLE_REQUEST_CODE = 0x00;
+-        private static final int SILABSER_SET_BAUDDIV_REQUEST_CODE = 0x01;
+-        private static final int SILABSER_SET_LINE_CTL_REQUEST_CODE = 0x03;
+-        private static final int SILABSER_SET_MHS_REQUEST_CODE = 0x07;
+-        private static final int SILABSER_SET_BAUDRATE = 0x1E;
+-        private static final int SILABSER_FLUSH_REQUEST_CODE = 0x12;
+-
+-       private static final int FLUSH_READ_CODE = 0x0a;
+-       private static final int FLUSH_WRITE_CODE = 0x05;
+-
+-        /*
+-         * SILABSER_IFC_ENABLE_REQUEST_CODE
+-         */
+-        private static final int UART_ENABLE = 0x0001;
+-        private static final int UART_DISABLE = 0x0000;
+-
+-        /*
+-         * SILABSER_SET_BAUDDIV_REQUEST_CODE
+-         */
+-        private static final int BAUD_RATE_GEN_FREQ = 0x384000;
+-
+-        /*
+-         * SILABSER_SET_MHS_REQUEST_CODE
+-         */
+-        private static final int MCR_DTR = 0x0001;
+-        private static final int MCR_RTS = 0x0002;
+-        private static final int MCR_ALL = 0x0003;
+-
+-        private static final int CONTROL_WRITE_DTR = 0x0100;
+-        private static final int CONTROL_WRITE_RTS = 0x0200;
+-
+-        private UsbEndpoint mReadEndpoint;
+-        private UsbEndpoint mWriteEndpoint;
+-
+-        public Cp21xxSerialPort(UsbDevice device, int portNumber) {
+-            super(device, portNumber);
+-        }
+-
+-        @Override
+-        public UsbSerialDriver getDriver() {
+-            return Cp21xxSerialDriver.this;
+-        }
+-
+-        private int setConfigSingle(int request, int value) {
+-            return mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, request, value,
+-                    0, null, 0, USB_WRITE_TIMEOUT_MILLIS);
+-        }
+-
+-        @Override
+-        public void open(UsbDeviceConnection connection) throws IOException {
+-            if (mConnection != null) {
+-                throw new IOException("Already opened.");
+-            }
+-
+-            mConnection = connection;
+-            boolean opened = false;
+-            try {
+-                for (int i = 0; i < mDevice.getInterfaceCount(); i++) {
+-                    UsbInterface usbIface = mDevice.getInterface(i);
+-                    if (mConnection.claimInterface(usbIface, true)) {
+-                        Log.d(TAG, "claimInterface " + i + " SUCCESS");
+-                    } else {
+-                        Log.d(TAG, "claimInterface " + i + " FAIL");
+-                    }
+-                }
+-
+-                UsbInterface dataIface = mDevice.getInterface(mDevice.getInterfaceCount() - 1);
+-                for (int i = 0; i < dataIface.getEndpointCount(); i++) {
+-                    UsbEndpoint ep = dataIface.getEndpoint(i);
+-                    if (ep.getType() == UsbConstants.USB_ENDPOINT_XFER_BULK) {
+-                        if (ep.getDirection() == UsbConstants.USB_DIR_IN) {
+-                            mReadEndpoint = ep;
+-                        } else {
+-                            mWriteEndpoint = ep;
+-                        }
+-                    }
+-                }
+-
+-                setConfigSingle(SILABSER_IFC_ENABLE_REQUEST_CODE, UART_ENABLE);
+-                setConfigSingle(SILABSER_SET_MHS_REQUEST_CODE, MCR_ALL | CONTROL_WRITE_DTR | CONTROL_WRITE_RTS);
+-                setConfigSingle(SILABSER_SET_BAUDDIV_REQUEST_CODE, BAUD_RATE_GEN_FREQ / DEFAULT_BAUD_RATE);
+-    //            setParameters(DEFAULT_BAUD_RATE, DEFAULT_DATA_BITS, DEFAULT_STOP_BITS, DEFAULT_PARITY);
+-                opened = true;
+-            } finally {
+-                if (!opened) {
+-                    try {
+-                        close();
+-                    } catch (IOException e) {
+-                        // Ignore IOExceptions during close()
+-                    }
+-                }
+-            }
+-        }
+-
+-        @Override
+-        public void close() throws IOException {
+-            if (mConnection == null) {
+-                throw new IOException("Already closed");
+-            }
+-            try {
+-                setConfigSingle(SILABSER_IFC_ENABLE_REQUEST_CODE, UART_DISABLE);
+-                mConnection.close();
+-            } finally {
+-                mConnection = null;
+-            }
+-        }
+-
+-        @Override
+-        public int read(byte[] dest, int timeoutMillis) throws IOException {
+-            final int numBytesRead;
+-            synchronized (mReadBufferLock) {
+-                int readAmt = Math.min(dest.length, mReadBuffer.length);
+-                numBytesRead = mConnection.bulkTransfer(mReadEndpoint, mReadBuffer, readAmt,
+-                        timeoutMillis);
+-                if (numBytesRead < 0) {
+-                    // This sucks: we get -1 on timeout, not 0 as preferred.
+-                    // We *should* use UsbRequest, except it has a bug/api oversight
+-                    // where there is no way to determine the number of bytes read
+-                    // in response :\ -- http://b.android.com/28023
+-                    return 0;
+-                }
+-                System.arraycopy(mReadBuffer, 0, dest, 0, numBytesRead);
+-            }
+-            return numBytesRead;
+-        }
+-
+-        @Override
+-        public int write(byte[] src, int timeoutMillis) throws IOException {
+-            int offset = 0;
+-
+-            while (offset < src.length) {
+-                final int writeLength;
+-                final int amtWritten;
+-
+-                synchronized (mWriteBufferLock) {
+-                    final byte[] writeBuffer;
+-
+-                    writeLength = Math.min(src.length - offset, mWriteBuffer.length);
+-                    if (offset == 0) {
+-                        writeBuffer = src;
+-                    } else {
+-                        // bulkTransfer does not support offsets, make a copy.
+-                        System.arraycopy(src, offset, mWriteBuffer, 0, writeLength);
+-                        writeBuffer = mWriteBuffer;
+-                    }
+-
+-                    amtWritten = mConnection.bulkTransfer(mWriteEndpoint, writeBuffer, writeLength,
+-                            timeoutMillis);
+-                }
+-                if (amtWritten <= 0) {
+-                    throw new IOException("Error writing " + writeLength
+-                            + " bytes at offset " + offset + " length=" + src.length);
+-                }
+-
+-                Log.d(TAG, "Wrote amt=" + amtWritten + " attempted=" + writeLength);
+-                offset += amtWritten;
+-            }
+-            return offset;
+-        }
+-
+-        private void setBaudRate(int baudRate) throws IOException {
+-            byte[] data = new byte[] {
+-                    (byte) ( baudRate & 0xff),
+-                    (byte) ((baudRate >> 8 ) & 0xff),
+-                    (byte) ((baudRate >> 16) & 0xff),
+-                    (byte) ((baudRate >> 24) & 0xff)
+-            };
+-            int ret = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, SILABSER_SET_BAUDRATE,
+-                    0, 0, data, 4, USB_WRITE_TIMEOUT_MILLIS);
+-            if (ret < 0) {
+-                throw new IOException("Error setting baud rate.");
+-            }
+-        }
+-
+-        @Override
+-        public void setParameters(int baudRate, int dataBits, int stopBits, int parity)
+-                throws IOException {
+-            setBaudRate(baudRate);
+-
+-            int configDataBits = 0;
+-            switch (dataBits) {
+-                case DATABITS_5:
+-                    configDataBits |= 0x0500;
+-                    break;
+-                case DATABITS_6:
+-                    configDataBits |= 0x0600;
+-                    break;
+-                case DATABITS_7:
+-                    configDataBits |= 0x0700;
+-                    break;
+-                case DATABITS_8:
+-                    configDataBits |= 0x0800;
+-                    break;
+-                default:
+-                    configDataBits |= 0x0800;
+-                    break;
+-            }
+-            
+-            switch (parity) {
+-                case PARITY_ODD:
+-                    configDataBits |= 0x0010;
+-                    break;
+-                case PARITY_EVEN:
+-                    configDataBits |= 0x0020;
+-                    break;
+-            }
+-            
+-            switch (stopBits) {
+-                case STOPBITS_1:
+-                    configDataBits |= 0;
+-                    break;
+-                case STOPBITS_2:
+-                    configDataBits |= 2;
+-                    break;
+-            }
+-            setConfigSingle(SILABSER_SET_LINE_CTL_REQUEST_CODE, configDataBits);
+-        }
+-
+-        @Override
+-        public boolean getCD() throws IOException {
+-            return false;
+-        }
+-
+-        @Override
+-        public boolean getCTS() throws IOException {
+-            return false;
+-        }
+-
+-        @Override
+-        public boolean getDSR() throws IOException {
+-            return false;
+-        }
+-
+-        @Override
+-        public boolean getDTR() throws IOException {
+-            return true;
+-        }
+-
+-        @Override
+-        public void setDTR(boolean value) throws IOException {
+-        }
+-
+-        @Override
+-        public boolean getRI() throws IOException {
+-            return false;
+-        }
+-
+-        @Override
+-        public boolean getRTS() throws IOException {
+-            return true;
+-        }
+-
+-        @Override
+-        public void setRTS(boolean value) throws IOException {
+-        }
+-
+-        @Override
+-        public boolean purgeHwBuffers(boolean purgeReadBuffers,
+-                boolean purgeWriteBuffers) throws IOException {
+-            int value = (purgeReadBuffers ? FLUSH_READ_CODE : 0)
+-                    | (purgeWriteBuffers ? FLUSH_WRITE_CODE : 0);
+-
+-            if (value != 0) {
+-                setConfigSingle(SILABSER_FLUSH_REQUEST_CODE, value);
+-            }
+-
+-            return true;
+-        }
+-
+-    }
+-
+-    public static Map<Integer, int[]> getSupportedDevices() {
+-        final Map<Integer, int[]> supportedDevices = new LinkedHashMap<Integer, int[]>();
+-        supportedDevices.put(Integer.valueOf(UsbId.VENDOR_SILABS),
+-                new int[] {
+-            UsbId.SILABS_CP2102,
+-            UsbId.SILABS_CP2105,
+-            UsbId.SILABS_CP2108,
+-            UsbId.SILABS_CP2110
+-        });
+-        return supportedDevices;
+-    }
+-
+-}
+diff -Nur usbSerialForAndroid/src/main/java/com/hoho/android/usbserial/driver/FtdiSerialDriver.java /home/greblus/build/us4a-aspeqt/usbserial/driver/FtdiSerialDriver.java
+--- usbSerialForAndroid/src/main/java/com/hoho/android/usbserial/driver/FtdiSerialDriver.java	2017-06-24 20:19:58.961502204 +0200
++++ /home/greblus/build/us4a-aspeqt/usbserial/driver/FtdiSerialDriver.java	2017-06-24 14:18:22.551642559 +0200
+@@ -118,7 +118,7 @@
+         return Collections.singletonList(mPort);
+     }
+ 
+-    private class FtdiSerialPort extends CommonUsbSerialPort {
++    public class FtdiSerialPort extends CommonUsbSerialPort {
+ 
+         public static final int USB_TYPE_STANDARD = 0x00 << 5;
+         public static final int USB_TYPE_CLASS = 0x00 << 5;
+@@ -133,8 +133,8 @@
+         public static final int USB_ENDPOINT_IN = 0x80;
+         public static final int USB_ENDPOINT_OUT = 0x00;
+ 
+-        public static final int USB_WRITE_TIMEOUT_MILLIS = 5000;
+-        public static final int USB_READ_TIMEOUT_MILLIS = 5000;
++        public static final int USB_WRITE_TIMEOUT_MILLIS = 50000;
++        public static final int USB_READ_TIMEOUT_MILLIS = 50000;
+ 
+ 
+         // From ftdi.h
+@@ -152,6 +152,8 @@
+          * Set flow control register.
+          */
+         private static final int SIO_SET_FLOW_CTRL_REQUEST = 2;
++        private static final int SIO_SET_FLOW_CTRL_REQUEST_TYPE = 0x40;
++        private static final int SIO_DISABLE_FLOW_CTRL = 0;
+ 
+         /**
+          * Set baud rate.
+@@ -212,10 +214,10 @@
+          * @return The number of payload bytes
+          */
+         private final int filterStatusBytes(byte[] src, byte[] dest, int totalBytesRead, int maxPacketSize) {
+-            final int packetsCount = totalBytesRead / maxPacketSize + (totalBytesRead % maxPacketSize == 0 ? 0 : 1);
++            final int packetsCount = (totalBytesRead + maxPacketSize -1 ) / maxPacketSize;
+             for (int packetIdx = 0; packetIdx < packetsCount; ++packetIdx) {
+                 final int count = (packetIdx == (packetsCount - 1))
+-                        ? (totalBytesRead % maxPacketSize) - MODEM_STATUS_HEADER_LENGTH
++                        ? totalBytesRead - packetIdx * maxPacketSize - MODEM_STATUS_HEADER_LENGTH
+                         : maxPacketSize - MODEM_STATUS_HEADER_LENGTH;
+                 if (count > 0) {
+                     try {
+@@ -348,7 +350,6 @@
+         @Override
+         public int swrite(byte[] src, int size, int timeoutMillis) throws IOException {
+             final UsbEndpoint endpoint = mDevice.getInterface(0).getEndpoint(1);
+-            Log.i("FTDI", "endpoints: " + mDevice.getInterface(0).getEndpointCount());
+             int offset = 0;
+ 
+             while (offset < size) {
+@@ -451,6 +452,14 @@
+             if (result != 0) {
+                 throw new IOException("Setting parameters failed: result=" + result);
+             }
++            //disable flow control, needed for FT231X
++            result = mConnection.controlTransfer(FTDI_DEVICE_OUT_REQTYPE,
++                    SIO_SET_FLOW_CTRL_REQUEST, SIO_DISABLE_FLOW_CTRL, 0 /* index */,
++                    null, 0, USB_WRITE_TIMEOUT_MILLIS);
++            if (result != 0) {
++                throw new IOException("Cannot disable flow control: result=" + result);
++            }
++
+         }
+ 
+         private long[] convertBaudrate(int baudrate) {
+diff -Nur usbSerialForAndroid/src/main/java/com/hoho/android/usbserial/driver/ProlificSerialDriver.java /home/greblus/build/us4a-aspeqt/usbserial/driver/ProlificSerialDriver.java
+--- usbSerialForAndroid/src/main/java/com/hoho/android/usbserial/driver/ProlificSerialDriver.java	2017-06-24 20:19:58.961502204 +0200
++++ /home/greblus/build/us4a-aspeqt/usbserial/driver/ProlificSerialDriver.java	1970-01-01 01:00:00.000000000 +0100
+@@ -1,574 +0,0 @@
+-/* This library is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU Lesser General Public
+- * License as published by the Free Software Foundation; either
+- * version 2.1 of the License, or (at your option) any later version.
+- *
+- * This library is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+- * Lesser General Public License for more details.
+- *
+- * You should have received a copy of the GNU Lesser General Public
+- * License along with this library; if not, write to the Free Software
+- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301,
+- * USA.
+- *
+- * Project home page: https://github.com/mik3y/usb-serial-for-android
+- */
+-
+-/*
+- * Ported to usb-serial-for-android
+- * by Felix Hädicke <felixhaedicke@web.de>
+- *
+- * Based on the pyprolific driver written
+- * by Emmanuel Blot <emmanuel.blot@free.fr>
+- * See https://github.com/eblot/pyftdi
+- */
+-
+-package com.hoho.android.usbserial.driver;
+-
+-import android.hardware.usb.UsbConstants;
+-import android.hardware.usb.UsbDevice;
+-import android.hardware.usb.UsbDeviceConnection;
+-import android.hardware.usb.UsbEndpoint;
+-import android.hardware.usb.UsbInterface;
+-import android.util.Log;
+-
+-import java.io.IOException;
+-import java.lang.reflect.Method;
+-import java.util.Collections;
+-import java.util.LinkedHashMap;
+-import java.util.List;
+-import java.util.Map;
+-
+-public class ProlificSerialDriver implements UsbSerialDriver {
+-
+-    private final String TAG = ProlificSerialDriver.class.getSimpleName();
+-
+-    private final UsbDevice mDevice;
+-    private final UsbSerialPort mPort;
+-
+-    public ProlificSerialDriver(UsbDevice device) {
+-        mDevice = device;
+-        mPort = new ProlificSerialPort(mDevice, 0);
+-    }
+-
+-    @Override
+-    public List<UsbSerialPort> getPorts() {
+-        return Collections.singletonList(mPort);
+-    }
+-
+-    @Override
+-    public UsbDevice getDevice() {
+-        return mDevice;
+-    }
+-
+-    class ProlificSerialPort extends CommonUsbSerialPort {
+-
+-        private static final int USB_READ_TIMEOUT_MILLIS = 1000;
+-        private static final int USB_WRITE_TIMEOUT_MILLIS = 5000;
+-
+-        private static final int USB_RECIP_INTERFACE = 0x01;
+-
+-        private static final int PROLIFIC_VENDOR_READ_REQUEST = 0x01;
+-        private static final int PROLIFIC_VENDOR_WRITE_REQUEST = 0x01;
+-
+-        private static final int PROLIFIC_VENDOR_OUT_REQTYPE = UsbConstants.USB_DIR_OUT
+-                | UsbConstants.USB_TYPE_VENDOR;
+-
+-        private static final int PROLIFIC_VENDOR_IN_REQTYPE = UsbConstants.USB_DIR_IN
+-                | UsbConstants.USB_TYPE_VENDOR;
+-
+-        private static final int PROLIFIC_CTRL_OUT_REQTYPE = UsbConstants.USB_DIR_OUT
+-                | UsbConstants.USB_TYPE_CLASS | USB_RECIP_INTERFACE;
+-
+-        private static final int WRITE_ENDPOINT = 0x02;
+-        private static final int READ_ENDPOINT = 0x83;
+-        private static final int INTERRUPT_ENDPOINT = 0x81;
+-
+-        private static final int FLUSH_RX_REQUEST = 0x08;
+-        private static final int FLUSH_TX_REQUEST = 0x09;
+-
+-        private static final int SET_LINE_REQUEST = 0x20;
+-        private static final int SET_CONTROL_REQUEST = 0x22;
+-
+-        private static final int CONTROL_DTR = 0x01;
+-        private static final int CONTROL_RTS = 0x02;
+-
+-        private static final int STATUS_FLAG_CD = 0x01;
+-        private static final int STATUS_FLAG_DSR = 0x02;
+-        private static final int STATUS_FLAG_RI = 0x08;
+-        private static final int STATUS_FLAG_CTS = 0x80;
+-
+-        private static final int STATUS_BUFFER_SIZE = 10;
+-        private static final int STATUS_BYTE_IDX = 8;
+-
+-        private static final int DEVICE_TYPE_HX = 0;
+-        private static final int DEVICE_TYPE_0 = 1;
+-        private static final int DEVICE_TYPE_1 = 2;
+-
+-        private int mDeviceType = DEVICE_TYPE_HX;
+-
+-        private UsbEndpoint mReadEndpoint;
+-        private UsbEndpoint mWriteEndpoint;
+-        private UsbEndpoint mInterruptEndpoint;
+-
+-        private int mControlLinesValue = 0;
+-
+-        private int mBaudRate = -1, mDataBits = -1, mStopBits = -1, mParity = -1;
+-
+-        private int mStatus = 0;
+-        private volatile Thread mReadStatusThread = null;
+-        private final Object mReadStatusThreadLock = new Object();
+-        boolean mStopReadStatusThread = false;
+-        private IOException mReadStatusException = null;
+-
+-
+-        public ProlificSerialPort(UsbDevice device, int portNumber) {
+-            super(device, portNumber);
+-        }
+-
+-        @Override
+-        public UsbSerialDriver getDriver() {
+-            return ProlificSerialDriver.this;
+-        }
+-
+-        private final byte[] inControlTransfer(int requestType, int request,
+-                int value, int index, int length) throws IOException {
+-            byte[] buffer = new byte[length];
+-            int result = mConnection.controlTransfer(requestType, request, value,
+-                    index, buffer, length, USB_READ_TIMEOUT_MILLIS);
+-            if (result != length) {
+-                throw new IOException(
+-                        String.format("ControlTransfer with value 0x%x failed: %d",
+-                                value, result));
+-            }
+-            return buffer;
+-        }
+-
+-        private final void outControlTransfer(int requestType, int request,
+-                int value, int index, byte[] data) throws IOException {
+-            int length = (data == null) ? 0 : data.length;
+-            int result = mConnection.controlTransfer(requestType, request, value,
+-                    index, data, length, USB_WRITE_TIMEOUT_MILLIS);
+-            if (result != length) {
+-                throw new IOException(
+-                        String.format("ControlTransfer with value 0x%x failed: %d",
+-                                value, result));
+-            }
+-        }
+-
+-        private final byte[] vendorIn(int value, int index, int length)
+-                throws IOException {
+-            return inControlTransfer(PROLIFIC_VENDOR_IN_REQTYPE,
+-                    PROLIFIC_VENDOR_READ_REQUEST, value, index, length);
+-        }
+-
+-        private final void vendorOut(int value, int index, byte[] data)
+-                throws IOException {
+-            outControlTransfer(PROLIFIC_VENDOR_OUT_REQTYPE,
+-                    PROLIFIC_VENDOR_WRITE_REQUEST, value, index, data);
+-        }
+-
+-        private void resetDevice() throws IOException {
+-            purgeHwBuffers(true, true);
+-        }
+-
+-        private final void ctrlOut(int request, int value, int index, byte[] data)
+-                throws IOException {
+-            outControlTransfer(PROLIFIC_CTRL_OUT_REQTYPE, request, value, index,
+-                    data);
+-        }
+-
+-        private void doBlackMagic() throws IOException {
+-            vendorIn(0x8484, 0, 1);
+-            vendorOut(0x0404, 0, null);
+-            vendorIn(0x8484, 0, 1);
+-            vendorIn(0x8383, 0, 1);
+-            vendorIn(0x8484, 0, 1);
+-            vendorOut(0x0404, 1, null);
+-            vendorIn(0x8484, 0, 1);
+-            vendorIn(0x8383, 0, 1);
+-            vendorOut(0, 1, null);
+-            vendorOut(1, 0, null);
+-            vendorOut(2, (mDeviceType == DEVICE_TYPE_HX) ? 0x44 : 0x24, null);
+-        }
+-
+-        private void setControlLines(int newControlLinesValue) throws IOException {
+-            ctrlOut(SET_CONTROL_REQUEST, newControlLinesValue, 0, null);
+-            mControlLinesValue = newControlLinesValue;
+-        }
+-
+-        private final void readStatusThreadFunction() {
+-            try {
+-                while (!mStopReadStatusThread) {
+-                    byte[] buffer = new byte[STATUS_BUFFER_SIZE];
+-                    int readBytesCount = mConnection.bulkTransfer(mInterruptEndpoint,
+-                            buffer,
+-                            STATUS_BUFFER_SIZE,
+-                            500);
+-                    if (readBytesCount > 0) {
+-                        if (readBytesCount == STATUS_BUFFER_SIZE) {
+-                            mStatus = buffer[STATUS_BYTE_IDX] & 0xff;
+-                        } else {
+-                            throw new IOException(
+-                                    String.format("Invalid CTS / DSR / CD / RI status buffer received, expected %d bytes, but received %d",
+-                                            STATUS_BUFFER_SIZE,
+-                                            readBytesCount));
+-                        }
+-                    }
+-                }
+-            } catch (IOException e) {
+-                mReadStatusException = e;
+-            }
+-        }
+-
+-        @Override
+-        public int setBaudRate(int baudRate) throws IOException {
+-            return baudRate;
+-        }
+-
+-        @Override
+-        public final int getStatus() throws IOException {
+-            if ((mReadStatusThread == null) && (mReadStatusException == null)) {
+-                synchronized (mReadStatusThreadLock) {
+-                    if (mReadStatusThread == null) {
+-                        byte[] buffer = new byte[STATUS_BUFFER_SIZE];
+-                        int readBytes = mConnection.bulkTransfer(mInterruptEndpoint,
+-                                buffer,
+-                                STATUS_BUFFER_SIZE,
+-                                100);
+-                        if (readBytes != STATUS_BUFFER_SIZE) {
+-                            Log.w(TAG, "Could not read initial CTS / DSR / CD / RI status");
+-                        } else {
+-                            mStatus = buffer[STATUS_BYTE_IDX] & 0xff;
+-                        }
+-
+-                        mReadStatusThread = new Thread(new Runnable() {
+-                            @Override
+-                            public void run() {
+-                                readStatusThreadFunction();
+-                            }
+-                        });
+-                        mReadStatusThread.setDaemon(true);
+-                        mReadStatusThread.start();
+-                    }
+-                }
+-            }
+-
+-            /* throw and clear an exception which occured in the status read thread */
+-            IOException readStatusException = mReadStatusException;
+-            if (mReadStatusException != null) {
+-                mReadStatusException = null;
+-                throw readStatusException;
+-            }
+-
+-            return mStatus;
+-        }
+-
+-        private final boolean testStatusFlag(int flag) throws IOException {
+-            return ((getStatus() & flag) == flag);
+-        }
+-
+-        @Override
+-        public void open(UsbDeviceConnection connection) throws IOException {
+-            if (mConnection != null) {
+-                throw new IOException("Already open");
+-            }
+-
+-            UsbInterface usbInterface = mDevice.getInterface(0);
+-
+-            if (!connection.claimInterface(usbInterface, true)) {
+-                throw new IOException("Error claiming Prolific interface 0");
+-            }
+-
+-            mConnection = connection;
+-            boolean opened = false;
+-            try {
+-                for (int i = 0; i < usbInterface.getEndpointCount(); ++i) {
+-                    UsbEndpoint currentEndpoint = usbInterface.getEndpoint(i);
+-
+-                    switch (currentEndpoint.getAddress()) {
+-                    case READ_ENDPOINT:
+-                        mReadEndpoint = currentEndpoint;
+-                        break;
+-
+-                    case WRITE_ENDPOINT:
+-                        mWriteEndpoint = currentEndpoint;
+-                        break;
+-
+-                    case INTERRUPT_ENDPOINT:
+-                        mInterruptEndpoint = currentEndpoint;
+-                        break;
+-                    }
+-                }
+-
+-                if (mDevice.getDeviceClass() == 0x02) {
+-                    mDeviceType = DEVICE_TYPE_0;
+-                } else {
+-                    try {
+-                        Method getRawDescriptorsMethod
+-                            = mConnection.getClass().getMethod("getRawDescriptors");
+-                        byte[] rawDescriptors
+-                            = (byte[]) getRawDescriptorsMethod.invoke(mConnection);
+-                        byte maxPacketSize0 = rawDescriptors[7];
+-                        if (maxPacketSize0 == 64) {
+-                            mDeviceType = DEVICE_TYPE_HX;
+-                        } else if ((mDevice.getDeviceClass() == 0x00)
+-                                || (mDevice.getDeviceClass() == 0xff)) {
+-                            mDeviceType = DEVICE_TYPE_1;
+-                        } else {
+-                          Log.w(TAG, "Could not detect PL2303 subtype, "
+-                              + "Assuming that it is a HX device");
+-                          mDeviceType = DEVICE_TYPE_HX;
+-                        }
+-                    } catch (NoSuchMethodException e) {
+-                        Log.w(TAG, "Method UsbDeviceConnection.getRawDescriptors, "
+-                                + "required for PL2303 subtype detection, not "
+-                                + "available! Assuming that it is a HX device");
+-                        mDeviceType = DEVICE_TYPE_HX;
+-                    } catch (Exception e) {
+-                        Log.e(TAG, "An unexpected exception occured while trying "
+-                                + "to detect PL2303 subtype", e);
+-                    }
+-                }
+-
+-                setControlLines(mControlLinesValue);
+-                resetDevice();
+-
+-                doBlackMagic();
+-                opened = true;
+-            } finally {
+-                if (!opened) {
+-                    mConnection = null;
+-                    connection.releaseInterface(usbInterface);
+-                }
+-            }
+-        }
+-
+-        @Override
+-        public void close() throws IOException {
+-            if (mConnection == null) {
+-                throw new IOException("Already closed");
+-            }
+-            try {
+-                mStopReadStatusThread = true;
+-                synchronized (mReadStatusThreadLock) {
+-                    if (mReadStatusThread != null) {
+-                        try {
+-                            mReadStatusThread.join();
+-                        } catch (Exception e) {
+-                            Log.w(TAG, "An error occured while waiting for status read thread", e);
+-                        }
+-                    }
+-                }
+-                resetDevice();
+-            } finally {
+-                try {
+-                    mConnection.releaseInterface(mDevice.getInterface(0));
+-                } finally {
+-                    mConnection = null;
+-                }
+-            }
+-        }
+-
+-        @Override
+-        public int read(byte[] dest, int timeoutMillis) throws IOException {
+-            int size = dest.length;
+-            return sread(dest, size, timeoutMillis);
+-        }
+-
+-        @Override
+-        public int sread(byte[] dest, int size, int timeoutMillis) throws IOException {
+-            synchronized (mReadBufferLock) {
+-                int readAmt = Math.min(size, mReadBuffer.length);
+-                int numBytesRead = mConnection.bulkTransfer(mReadEndpoint, mReadBuffer,
+-                        readAmt, timeoutMillis);
+-                if (numBytesRead < 0) {
+-                    return 0;
+-                }
+-                System.arraycopy(mReadBuffer, 0, dest, 0, numBytesRead);
+-                return numBytesRead;
+-            }
+-        }
+-
+-        @Override
+-        public int write(byte[] src, int timeoutMillis) throws IOException {
+-            int size = src.length;
+-            return swrite(src, size, timeoutMillis);
+-        }
+-
+-        @Override
+-        public int swrite(byte[] src, int size, int timeoutMillis) throws IOException {
+-            int offset = 0;
+-
+-            while (offset < size) {
+-                final int writeLength;
+-                final int amtWritten;
+-
+-                synchronized (mWriteBufferLock) {
+-                    final byte[] writeBuffer;
+-
+-                    writeLength = Math.min(size - offset, mWriteBuffer.length);
+-                    if (offset == 0) {
+-                        writeBuffer = src;
+-                    } else {
+-                        // bulkTransfer does not support offsets, make a copy.
+-                        System.arraycopy(src, offset, mWriteBuffer, 0, writeLength);
+-                        writeBuffer = mWriteBuffer;
+-                    }
+-
+-                    amtWritten = mConnection.bulkTransfer(mWriteEndpoint,
+-                            writeBuffer, writeLength, timeoutMillis);
+-                }
+-
+-                if (amtWritten <= 0) {
+-                    throw new IOException("Error writing " + writeLength
+-                            + " bytes at offset " + offset + " length="
+-                            + size);
+-                }
+-
+-                offset += amtWritten;
+-            }
+-            return offset;
+-        }
+-
+-        @Override
+-        public void setParameters(int baudRate, int dataBits, int stopBits,
+-                int parity) throws IOException {
+-            if ((mBaudRate == baudRate) && (mDataBits == dataBits)
+-                    && (mStopBits == stopBits) && (mParity == parity)) {
+-                // Make sure no action is performed if there is nothing to change
+-                return;
+-            }
+-
+-            byte[] lineRequestData = new byte[7];
+-
+-            lineRequestData[0] = (byte) (baudRate & 0xff);
+-            lineRequestData[1] = (byte) ((baudRate >> 8) & 0xff);
+-            lineRequestData[2] = (byte) ((baudRate >> 16) & 0xff);
+-            lineRequestData[3] = (byte) ((baudRate >> 24) & 0xff);
+-
+-            switch (stopBits) {
+-            case STOPBITS_1:
+-                lineRequestData[4] = 0;
+-                break;
+-
+-            case STOPBITS_1_5:
+-                lineRequestData[4] = 1;
+-                break;
+-
+-            case STOPBITS_2:
+-                lineRequestData[4] = 2;
+-                break;
+-
+-            default:
+-                throw new IllegalArgumentException("Unknown stopBits value: " + stopBits);
+-            }
+-
+-            switch (parity) {
+-            case PARITY_NONE:
+-                lineRequestData[5] = 0;
+-                break;
+-
+-            case PARITY_ODD:
+-                lineRequestData[5] = 1;
+-                break;
+-
+-            case PARITY_MARK:
+-                lineRequestData[5] = 3;
+-                break;
+-
+-            case PARITY_SPACE:
+-                lineRequestData[5] = 4;
+-                break;
+-
+-            default:
+-                throw new IllegalArgumentException("Unknown parity value: " + parity);
+-            }
+-
+-            lineRequestData[6] = (byte) dataBits;
+-
+-            ctrlOut(SET_LINE_REQUEST, 0, 0, lineRequestData);
+-
+-            resetDevice();
+-
+-            mBaudRate = baudRate;
+-            mDataBits = dataBits;
+-            mStopBits = stopBits;
+-            mParity = parity;
+-        }
+-
+-        @Override
+-        public boolean getCD() throws IOException {
+-            return testStatusFlag(STATUS_FLAG_CD);
+-        }
+-
+-        @Override
+-        public boolean getCTS() throws IOException {
+-            return testStatusFlag(STATUS_FLAG_CTS);
+-        }
+-
+-        @Override
+-        public boolean getDSR() throws IOException {
+-            return testStatusFlag(STATUS_FLAG_DSR);
+-        }
+-
+-        @Override
+-        public boolean getDTR() throws IOException {
+-            return ((mControlLinesValue & CONTROL_DTR) == CONTROL_DTR);
+-        }
+-
+-        @Override
+-        public void setDTR(boolean value) throws IOException {
+-            int newControlLinesValue;
+-            if (value) {
+-                newControlLinesValue = mControlLinesValue | CONTROL_DTR;
+-            } else {
+-                newControlLinesValue = mControlLinesValue & ~CONTROL_DTR;
+-            }
+-            setControlLines(newControlLinesValue);
+-        }
+-
+-        @Override
+-        public boolean getRI() throws IOException {
+-            return testStatusFlag(STATUS_FLAG_RI);
+-        }
+-
+-        @Override
+-        public boolean getRTS() throws IOException {
+-            return ((mControlLinesValue & CONTROL_RTS) == CONTROL_RTS);
+-        }
+-
+-        @Override
+-        public void setRTS(boolean value) throws IOException {
+-            int newControlLinesValue;
+-            if (value) {
+-                newControlLinesValue = mControlLinesValue | CONTROL_RTS;
+-            } else {
+-                newControlLinesValue = mControlLinesValue & ~CONTROL_RTS;
+-            }
+-            setControlLines(newControlLinesValue);
+-        }
+-
+-        @Override
+-        public boolean purgeHwBuffers(boolean purgeReadBuffers, boolean purgeWriteBuffers) throws IOException {
+-            if (purgeReadBuffers) {
+-                vendorOut(FLUSH_RX_REQUEST, 0, null);
+-            }
+-
+-            if (purgeWriteBuffers) {
+-                vendorOut(FLUSH_TX_REQUEST, 0, null);
+-            }
+-
+-            return purgeReadBuffers || purgeWriteBuffers;
+-        }
+-    }
+-
+-    public static Map<Integer, int[]> getSupportedDevices() {
+-        final Map<Integer, int[]> supportedDevices = new LinkedHashMap<Integer, int[]>();
+-        supportedDevices.put(Integer.valueOf(UsbId.VENDOR_PROLIFIC),
+-                new int[] { UsbId.PROLIFIC_PL2303, });
+-        return supportedDevices;
+-    }
+-}
+diff -Nur usbSerialForAndroid/src/main/java/com/hoho/android/usbserial/driver/UsbId.java /home/greblus/build/us4a-aspeqt/usbserial/driver/UsbId.java
+--- usbSerialForAndroid/src/main/java/com/hoho/android/usbserial/driver/UsbId.java	2017-06-24 20:19:58.961502204 +0200
++++ /home/greblus/build/us4a-aspeqt/usbserial/driver/UsbId.java	2017-06-04 01:04:38.519085019 +0200
+@@ -63,9 +63,6 @@
+     public static final int SILABS_CP2108 = 0xea71;
+     public static final int SILABS_CP2110 = 0xea80;
+ 
+-    public static final int VENDOR_PROLIFIC = 0x067b;
+-    public static final int PROLIFIC_PL2303 = 0x2303;
+-
+     private UsbId() {
+         throw new IllegalAccessError("Non-instantiable class.");
+     }
+diff -Nur usbSerialForAndroid/src/main/java/com/hoho/android/usbserial/driver/UsbSerialProber.java /home/greblus/build/us4a-aspeqt/usbserial/driver/UsbSerialProber.java
+--- usbSerialForAndroid/src/main/java/com/hoho/android/usbserial/driver/UsbSerialProber.java	2017-06-24 20:19:58.961502204 +0200
++++ /home/greblus/build/us4a-aspeqt/usbserial/driver/UsbSerialProber.java	2017-06-04 01:04:38.519085019 +0200
+@@ -48,7 +48,6 @@
+     public static ProbeTable getDefaultProbeTable() {
+         final ProbeTable probeTable = new ProbeTable();
+         probeTable.addDriver(FtdiSerialDriver.class);
+-        probeTable.addDriver(ProlificSerialDriver.class);
+         return probeTable;
+     }
+ 
+diff -Nur usbSerialForAndroid/src/main/java/com/hoho/android/usbserial/util/SerialInputOutputManager.java /home/greblus/build/us4a-aspeqt/usbserial/util/SerialInputOutputManager.java
+--- usbSerialForAndroid/src/main/java/com/hoho/android/usbserial/util/SerialInputOutputManager.java	2017-06-24 20:19:58.961502204 +0200
++++ /home/greblus/build/us4a-aspeqt/usbserial/util/SerialInputOutputManager.java	2017-06-23 20:55:04.259953687 +0200
+@@ -38,10 +38,10 @@
+ public class SerialInputOutputManager implements Runnable {
+ 
+     private static final String TAG = SerialInputOutputManager.class.getSimpleName();
+-    private static final boolean DEBUG = true;
++    private static final boolean DEBUG = false;
+ 
+-    private static final int READ_WAIT_MILLIS = 200;
+-    private static final int BUFSIZ = 4096;
++    private static final int READ_WAIT_MILLIS = 1;
++    private static final int BUFSIZ = 65535;
+ 
+     private final UsbSerialPort mDriver;
+ 

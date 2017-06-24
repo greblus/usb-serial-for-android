@@ -118,7 +118,7 @@ public class FtdiSerialDriver implements UsbSerialDriver {
         return Collections.singletonList(mPort);
     }
 
-    private class FtdiSerialPort extends CommonUsbSerialPort {
+    public class FtdiSerialPort extends CommonUsbSerialPort {
 
         public static final int USB_TYPE_STANDARD = 0x00 << 5;
         public static final int USB_TYPE_CLASS = 0x00 << 5;
@@ -133,8 +133,8 @@ public class FtdiSerialDriver implements UsbSerialDriver {
         public static final int USB_ENDPOINT_IN = 0x80;
         public static final int USB_ENDPOINT_OUT = 0x00;
 
-        public static final int USB_WRITE_TIMEOUT_MILLIS = 5000;
-        public static final int USB_READ_TIMEOUT_MILLIS = 5000;
+        public static final int USB_WRITE_TIMEOUT_MILLIS = 50000;
+        public static final int USB_READ_TIMEOUT_MILLIS = 50000;
 
 
         // From ftdi.h
@@ -152,6 +152,8 @@ public class FtdiSerialDriver implements UsbSerialDriver {
          * Set flow control register.
          */
         private static final int SIO_SET_FLOW_CTRL_REQUEST = 2;
+        private static final int SIO_SET_FLOW_CTRL_REQUEST_TYPE = 0x40;
+        private static final int SIO_DISABLE_FLOW_CTRL = 0;
 
         /**
          * Set baud rate.
@@ -212,10 +214,10 @@ public class FtdiSerialDriver implements UsbSerialDriver {
          * @return The number of payload bytes
          */
         private final int filterStatusBytes(byte[] src, byte[] dest, int totalBytesRead, int maxPacketSize) {
-            final int packetsCount = totalBytesRead / maxPacketSize + (totalBytesRead % maxPacketSize == 0 ? 0 : 1);
+            final int packetsCount = (totalBytesRead + maxPacketSize -1 ) / maxPacketSize;
             for (int packetIdx = 0; packetIdx < packetsCount; ++packetIdx) {
                 final int count = (packetIdx == (packetsCount - 1))
-                        ? (totalBytesRead % maxPacketSize) - MODEM_STATUS_HEADER_LENGTH
+                        ? totalBytesRead - packetIdx * maxPacketSize - MODEM_STATUS_HEADER_LENGTH
                         : maxPacketSize - MODEM_STATUS_HEADER_LENGTH;
                 if (count > 0) {
                     try {
@@ -348,7 +350,6 @@ public class FtdiSerialDriver implements UsbSerialDriver {
         @Override
         public int swrite(byte[] src, int size, int timeoutMillis) throws IOException {
             final UsbEndpoint endpoint = mDevice.getInterface(0).getEndpoint(1);
-            Log.i("FTDI", "endpoints: " + mDevice.getInterface(0).getEndpointCount());
             int offset = 0;
 
             while (offset < size) {
@@ -451,6 +452,14 @@ public class FtdiSerialDriver implements UsbSerialDriver {
             if (result != 0) {
                 throw new IOException("Setting parameters failed: result=" + result);
             }
+            //disable flow control, needed for FT231X
+            result = mConnection.controlTransfer(FTDI_DEVICE_OUT_REQTYPE,
+                    SIO_SET_FLOW_CTRL_REQUEST, SIO_DISABLE_FLOW_CTRL, 0 /* index */,
+                    null, 0, USB_WRITE_TIMEOUT_MILLIS);
+            if (result != 0) {
+                throw new IOException("Cannot disable flow control: result=" + result);
+            }
+
         }
 
         private long[] convertBaudrate(int baudrate) {
